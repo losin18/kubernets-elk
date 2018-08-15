@@ -1,0 +1,86 @@
+日志收集说明：
+在每个客户端安装filebeat插件，收集日志
+filebeat >(收集日志)>redis >接收日志> >从redis上获取日志>logstash>输出到>elasticsearch> > kibana 展示日志
+
+准备好k8s环境，安装好后，下载4个文件
+
+1、先运行redis-master-controller文件
+kubectl  create -f  redis-master-controller.yaml    #构建redis pod项目，开放30079端口供连接。
+查看服务命令：
+kubectl  get  svc  --all-namespaces
+
+2、构建elasticsearch环境
+   kubectl  create -f  elasticsearch-cluster.yml      #暴露端口为随机，如要固定，请在nodeport上指定 文件暴露端口为30927。
+  如图：
+
+   查看暴露的端口命令，为什么要查看端口，因为后期要用到
+  kubectl  get  svc  --all-namespaces
+ 查看健康状况：
+http://192.168.218.130:30927/_cat/health    #IP跟端口可能会不一样
+3、在要收集日志的服务器安装filebeat文件，配置如下：
+filebeat.prospectors:
+- type: log
+  enabled: true
+  paths:
+    - /apps/logs/pl-api.log
+  fields:
+      service: plapi
+
+filebeat.config.modules:
+  # Glob pattern for configuration loading
+  path: ${path.config}/modules.d/*.yml
+  # Set to true to enable config reloading
+  reload.enabled: false
+setup.template.settings:
+  index.number_of_shards: 10
+#-------------------------- redis output ------------------------------
+output.redis:
+   hosts: ["192.168.218.130:30079"]                       #redis服务器地址
+   key: "test_logs"
+   db: "1"
+4、安装nfs共享磁盘
+yum install -y nfs-utils rpcbind #除要共享磁盘的服务器安装两个服务外，其他所有节点要安装 nfs-utils 服务，不然无法连接
+cat /etc/exports
+/nfs 192.168.218.0/24(rw,no_root_squash,no_all_squash,sync) #只开启218段网络连接
+或者
+/nfs *(rw,no_root_squash,no_all_squash,sync) #开启所有客户端连接
+systemctl start rpcbind && systemctl enable rpcbind
+systemctl start nfs && systemctl enable nfs
+#服务器上查看
+showmount -e
+节点上查看
+showmount -e hostname 如：showmount -e 192.168.218.130 或者showmount -e node01
+
+5、构建logstash环境
+   先把logstash.conf 文件存放在nfs共享目录上
+#cat   logstash.conf 
+  input {
+     redis {
+        data_type => "list"
+        key => "test_logs"
+        host => "192.168.218.130"
+        port => "30079"
+        db => "1"
+        codec => json
+
+        }
+}
+output {
+    if [fields][service] == "pl-api" {
+       elasticsearch {
+            hosts => "192.168.218.130:31185"
+            index => "pro-pl-api-log"
+       }
+  }
+}
+构建logstash（注意：文件中磁盘的挂载地址及elasticsearch地址更改为自己主机地址）
+# kubectl  create -f   logstash.yaml
+
+6、构建kibana环境
+   编辑kibana.yaml（文件连接elasticsearch的IP跟端口）
+
+ 构建：
+   #kubectl  create -f  kibana.yaml
+完成
+
+可以写入日志并测试。
